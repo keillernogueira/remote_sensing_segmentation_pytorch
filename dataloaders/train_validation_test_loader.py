@@ -72,17 +72,19 @@ class TrainValTestLoader(data.Dataset):
 
         if self.mode == 'Train':
             data, labels, names = self.load_images(['2', '3'], simulate_images=simulate_images)
+            distrib = create_distrib_multi_images(labels, model, self.crop_size,
+                                                  self.stride_crop, self.num_classes,
+                                                  filtering_non_classes=(self.dataset == 'road_detection' or
+                                                                         self.dataset == 'river'),
+                                                  percentage_filter=(0.99 if self.dataset == 'road_detection' else 0.99),
+                                                  percentage_pos_class=(0.1 if self.dataset == 'road_detection' else 0.5))
         else:
             data, labels, names = self.load_images(['4'], simulate_images=simulate_images)
-        print(data.shape, labels.shape, names.shape)
+            distrib = create_distrib_multi_images(labels, model, self.crop_size,
+                                                  self.stride_crop, self.num_classes,
+                                                  filtering_non_classes=False)
 
-        distrib = create_distrib_multi_images(labels, model, self.reference_crop_size,
-                                              self.reference_stride_crop, self.num_classes,
-                                              filtering_non_classes=(self.dataset == 'road_detection' or
-                                                                     self.dataset == 'river'),
-                                              percentage_filter=(0.8 if self.dataset == 'road_detection' else 0.99),
-                                              percentage_pos_class=(0.1 if self.dataset == 'road_detection' else 0.5))
-        print(len(self.distrib))
+        print(data.shape, labels.shape, names.shape, len(distrib))
 
         if self.mode == 'Train':
             # calculate mean and std if train
@@ -128,21 +130,21 @@ class TrainValTestLoader(data.Dataset):
         mask = np.ones((self.crop_size, self.crop_size), dtype=np.bool)
 
         # Normalization.
-        normalize_images(data, self.mean, self.std)
+        normalize_images(img, self.mean, self.std)
 
         if self.mode == 'Train':
             img, label, mask = self.data_augmentation(img, label, mask)
 
-        print(img.shape)
         img = np.transpose(img, (2, 0, 1))
 
         # Turning to tensors.
-        img = torch.from_numpy(img)
-        label = torch.from_numpy(label)
-        mask = torch.from_numpy(mask)
+        img = torch.from_numpy(img.copy())
+        label = torch.from_numpy(label.copy())
+        mask = torch.from_numpy(mask.copy())
 
         # Returning to iterator.
-        return img, label, mask, self.distrib[index]
+        return img.double(), label, mask, self.distrib[index][0], self.distrib[index][1], self.distrib[index][2]
+        # , np.asarray(self.distrib[index])
 
     def __len__(self):
         return len(self.distrib)

@@ -8,6 +8,7 @@ from torch import optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from torch.backends import cudnn
 
 from config import *
 from utils import *
@@ -17,33 +18,34 @@ from dataloaders.factory import dataloader_factory
 from networks.factory import model_factory
 from networks.loss import CrossEntropyLoss
 
+cudnn.benchmark = True
+torch.set_default_tensor_type(torch.DoubleTensor)
 
-def test(test_loader, net, output_path, epoch, save_images=False):
+
+def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False):
     # Setting network for evaluation mode.
     net.eval()
 
-    prob_im = np.zeros([test_loader.data.shape[0], test_loader.data.shape[1], test_loader.data.shape[2],
-                        test_loader.num_classes], dtype=np.float32)
-    occur_im = np.zeros([test_loader.data.shape[0], test_loader.data.shape[1], test_loader.data.shape[2],
-                        test_loader.num_classes], dtype=np.float32)
+    prob_im = np.zeros([test_set.data.shape[0], test_set.data.shape[1], test_set.data.shape[2],
+                        test_set.num_classes], dtype=np.float32)
+    occur_im = np.zeros([test_set.data.shape[0], test_set.data.shape[1], test_set.data.shape[2],
+                        test_set.num_classes], dtype=np.float32)
 
     with torch.no_grad():
         # Iterating over batches.
         for i, data in enumerate(test_loader):
 
-            print('Test Batch %d/%d' % (i + 1, len(test_loader)))
-
             # Obtaining images, labels and paths for batch.
-            inps, labs, masks, img_pos = data
+            inps, labs, masks, cur_maps, cur_xs, cur_ys = data
 
             inps = inps.squeeze()
             labs = labs.squeeze()
             masks = masks.squeeze()
 
             # Casting to cuda variables.
-            inps = Variable(inps).cuda()
-            labs = Variable(labs).cuda()
-            masks = Variable(masks).cuda()
+            inps = Variable(inps).cuda(gpu)
+            labs = Variable(labs).cuda(gpu)
+            masks = Variable(masks).cuda(gpu)
 
             # Forwarding.
             if save_images:
@@ -62,37 +64,39 @@ def test(test_loader, net, output_path, epoch, save_images=False):
             # masks_flat = masks.cpu().numpy()
 
             for j in range(prds.shape[0]):
-                cur_map = img_pos[j][0]
-                cur_x = img_pos[j][1]
-                cur_y = img_pos[j][2]
+                cur_map = cur_maps[j]
+                cur_x = cur_xs[j]
+                cur_y = cur_ys[j]
 
-                prob_im[cur_map, cur_x:cur_x + test_loader.crop_size,
-                        cur_y:cur_y + test_loader.crop_size, :] += outs[j, :, :, :]
-                occur_im[cur_map, cur_x:cur_x + test_loader.crop_size, cur_y:cur_y + test_loader.crop_size, :] += 1
+                outs_p = outs.permute(0, 2, 3, 1).cpu().numpy()
+
+                prob_im[cur_map, cur_x:cur_x + test_set.crop_size,
+                        cur_y:cur_y + test_set.crop_size, :] += outs_p[j, :, :, :]
+                occur_im[cur_map, cur_x:cur_x + test_set.crop_size, cur_y:cur_y + test_set.crop_size, :] += 1
 
         occur_im[np.where(occur_im == 0)] = 1
         prob_im_argmax = np.argmax(prob_im / occur_im.astype(float), axis=-1)
 
         # Saving predictions.
         if save_images:
-            for k, img_name in enumerate(test_loader.names):
+            for k, img_name in enumerate(test_set.names):
                 pred_path = os.path.join(output_path, img_name.replace('.tif', '_prd.png'))
                 imageio.imsave(pred_path, prob_im_argmax[k])
 
-        cm_test = create_cm(test_loader.labels, prob_im_argmax)
+        cm_test = create_cm(test_set.labels, prob_im_argmax)
 
         _sum = 0.0
         total = 0
         for k in range(len(cm_test)):
-            _sum += (cm_test[k][k] / float(np.sum(cm_test[k])) if np.sum(cm_test[i]) != 0 else 0)
-            total += cm_test[i][i]
+            _sum += (cm_test[k][k] / float(np.sum(cm_test[k])) if np.sum(cm_test[k]) != 0 else 0)
+            total += cm_test[k][k]
 
         _sum_iou = (cm_test[1][1] / float(
             np.sum(cm_test[:, 1]) + np.sum(cm_test[1]) - cm_test[1][1])
                     if (np.sum(cm_test[:, 1]) + np.sum(cm_test[1]) - cm_test[1][1]) != 0
                     else 0)
 
-        print("Epoch" + str(epoch) +
+        print("Epoch " + str(epoch) +
               " -- Time " + str(datetime.datetime.now().time()) +
               " Absolut Right Pred= " + str(int(total)) +
               " Overall Accuracy= " + "{:.4f}".format(total / float(np.sum(cm_test))) +
@@ -104,7 +108,7 @@ def test(test_loader, net, output_path, epoch, save_images=False):
         sys.stdout.flush()
 
 
-def train(train_loader, net, criterion, optimizer, epoch):
+def train(train_loader, net, criterion, optimizer, epoch, gpu):
     # Setting network for training mode.
     net.train()
 
@@ -114,19 +118,19 @@ def train(train_loader, net, criterion, optimizer, epoch):
     # Iterating over batches.
     for i, data in enumerate(train_loader):
         # Obtaining images, labels and paths for batch.
-        inps, labs, masks, _ = data
+        inps, labs, masks, _, _, _ = data
 
         # Casting tensors to cuda.
-        inps, labs, masks = inps.cuda(), labs.cuda(), masks.cuda()
+        inps, labs, masks = inps.cuda(gpu), labs.cuda(gpu), masks.cuda(gpu)
 
         inps.squeeze_(0)
         labs.squeeze_(0)
         masks.squeeze_(0)
 
         # Casting to cuda variables.
-        inps = Variable(inps).cuda()
-        labs = Variable(labs).cuda()
-        masks = Variable(masks).cuda()
+        inps = Variable(inps).cuda(gpu)
+        labs = Variable(labs).cuda(gpu)
+        masks = Variable(masks).cuda(gpu)
 
         # Clears the gradients of optimizer.
         optimizer.zero_grad()
@@ -148,10 +152,6 @@ def train(train_loader, net, criterion, optimizer, epoch):
         # Appending images for epoch loss calculation.
         prds = prds.squeeze_(1).squeeze_(0).cpu().numpy()
 
-        inps_np = inps.detach().squeeze(0).cpu().numpy()
-        labs_np = labs.detach().squeeze(0).cpu().numpy()
-        mask_np = masks.detach().squeeze(0).cpu().numpy()
-
         # Updating loss meter.
         train_loss.append(loss.data.item())
 
@@ -159,23 +159,24 @@ def train(train_loader, net, criterion, optimizer, epoch):
         if (i + 1) % DISPLAY_STEP == 0:
             # print('[epoch %d], [iter %d / %d], [train loss %.5f]' %
             # (epoch, i + 1, len(train_loader), np.asarray(train_loss).mean()))
-            acc, batch_cm_train = calc_accuracy_by_crop(labs, prds, inps.shape[-1], None, masks)
+            acc, batch_cm_train = calc_accuracy_by_crop(labs, prds, outs.shape[1], None, masks)
+
             _sum = 0.0
             for k in range(len(batch_cm_train)):
                 _sum += (batch_cm_train[k][k] / float(np.sum(batch_cm_train[k]))
-                         if np.sum(batch_cm_train[i]) != 0 else 0)
+                         if np.sum(batch_cm_train[k]) != 0 else 0)
 
             _sum_iou = (batch_cm_train[1][1] / float(
                 np.sum(batch_cm_train[:, 1]) + np.sum(batch_cm_train[1]) - batch_cm_train[1][1])
                         if (np.sum(batch_cm_train[:, 1]) + np.sum(batch_cm_train[1]) - batch_cm_train[1][1]) != 0
                         else 0)
 
-            print("Epoch" + str(epoch) + " -- Iter " + str(i+1) + "/" + str(len(train_loader)) +
+            print("Epoch " + str(epoch) + " -- Iter " + str(i+1) + "/" + str(len(train_loader)) +
                   " -- Time " + str(datetime.datetime.now().time()) +
-                  " -- Training Minibatch: Loss= " + "{:.6f}".format(train_loss) +
+                  " -- Training Minibatch: Loss= " + "{:.6f}".format(train_loss[-1]) +
                   " Absolut Right Pred= " + str(int(acc)) +
                   " Overall Accuracy= " + "{:.4f}".format(acc / float(np.sum(batch_cm_train))) +
-                  " Normalized Accuracy= " + "{:.4f}".format(_sum / float(inps.shape[-1])) +
+                  " Normalized Accuracy= " + "{:.4f}".format(_sum / float(outs.shape[1])) +
                   " IoU= " + "{:.4f}".format(_sum_iou) +
                   " Confusion Matrix= " + np.array_str(batch_cm_train).replace("\n", "")
                   )
@@ -192,6 +193,8 @@ def main():
                         help='Path to to save outcomes (such as images and trained models) of the algorithm.')
     parser.add_argument('--simulate_dataset', type=str2bool, default=False,
                         help='Used to speed up the development process.')
+    parser.add_argument('--gpu', type=int, default=0,
+                        help='GPU number.')
 
     # dataset options
     parser.add_argument('--dataset', type=str, help='Dataset [Options: road_detection].')
@@ -242,12 +245,12 @@ def main():
     test_loader = DataLoader(test_set, batch_size=args.batch_size, num_workers=NUM_WORKERS, shuffle=False)
 
     # Setting network architecture.
-    net = model_factory(args.model_name, train_set.num_channels, train_set.num_classes).cuda()
+    net = model_factory(args.model_name, train_set.num_channels, train_set.num_classes).cuda(args.gpu)
     # net = SegNet(3, num_classes=list_dataset.num_classes, hidden_classes=hidden).cuda(args['device'])
     print(net)
 
     # criterion = CrossEntropyLoss2d(weight=None, size_average=False, ignore_index=5).cuda(args['device'])
-    criterion = CrossEntropyLoss(size_average=False).cuda()
+    criterion = CrossEntropyLoss(weight=torch.DoubleTensor([1.0, 3.0]), size_average=False).cuda(args.gpu)
 
     # Setting optimizer.
     # optimizer = optim.Adam([
@@ -258,7 +261,7 @@ def main():
     # ], betas=(args['momentum'], 0.99))
     optimizer = optim.Adam(net.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
                            betas=(0.9, 0.99))
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5000, gamma=0.5)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.5)
 
     curr_epoch = 1
     if args.model_path is not None:
@@ -268,14 +271,14 @@ def main():
     # Iterating over epochs.
     for epoch in range(curr_epoch, args.epoch_num + 1):
         # Training function.
-        train(train_loader, net, criterion, optimizer, epoch)
+        train(train_loader, net, criterion, optimizer, epoch, args.gpu)
 
         if epoch % VAL_INTERVAL == 0:
             torch.save(net.state_dict(), os.path.join(args.output_path, 'model_' + str(epoch) + '.pth'))
             torch.save(optimizer.state_dict(), os.path.join(args.output_path, 'opt_' + str(epoch) + '.pth'))
 
             # Computing test.
-            test(test_loader, net, criterion, optimizer, epoch, True, True)  # epoch % args['save_freq'] == 0)
+            test(test_loader, test_set, net, args.output_path, epoch, args.gpu, save_images=False)
 
         scheduler.step()
 

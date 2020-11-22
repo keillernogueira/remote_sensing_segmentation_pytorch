@@ -34,7 +34,7 @@ class _DecoderBlock(nn.Module):
         ]
 
         if num_blocks == 3:
-            layers.append(nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1))
+            layers.append(nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1))
             layers.append(nn.BatchNorm2d(in_channels))
             layers.append(nn.ReLU(inplace=True))
 
@@ -52,7 +52,7 @@ class _DecoderBlock(nn.Module):
         if self.dropout is not None:
             x = self.dropout(x)
         unpooled = F.max_unpool2d(x, indices, 2, 2, 0, size)
-        return self.features(unpooled)
+        return self.decode(unpooled)
 
 
 class SegNet(nn.Module):
@@ -76,9 +76,9 @@ class SegNet(nn.Module):
     def forward(self, x, feat=False):
         x = self.norm(x)
 
-        enc1, ind1, size1 = self.enc1(x)
-        enc2, ind2, size2 = self.enc2(enc1)
-        enc3, ind3, size3 = self.enc3(enc2)
+        (enc1, ind1), size1 = self.enc1(x)
+        (enc2, ind2), size2 = self.enc2(enc1)
+        (enc3, ind3), size3 = self.enc3(enc2)
 
         dec3 = self.dec3(enc3, ind3, size3)
         dec2 = self.dec2(dec3, ind2, size2)

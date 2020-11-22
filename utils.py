@@ -190,7 +190,8 @@ def calc_accuracy_by_crop(true_crop, pred_crop, num_classes, track_conf_matrix, 
                     # count += 1
                     if true_crop[i, j, k] == pred_crop[i, j, k]:
                         acc = acc + 1
-                    track_conf_matrix[true_crop[i, j, k]][pred_crop[i, j, k]] += 1
+                    if track_conf_matrix is not None:
+                        track_conf_matrix[true_crop[i, j, k]][pred_crop[i, j, k]] += 1
                     local_conf_matrix[true_crop[i, j, k]][pred_crop[i, j, k]] += 1
 
     # print count, b*h*w
