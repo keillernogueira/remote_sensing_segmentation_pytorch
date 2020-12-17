@@ -4,6 +4,7 @@ import numpy as np
 import imageio
 import argparse
 import matplotlib.pyplot as plt
+import torch
 
 
 def check_mkdir(dir_name):
@@ -25,6 +26,53 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
+def save_best_models(net, optimizer, output_path, distribution_type, patch_acc_loss, patch_occur, patch_chosen_values,
+                     best_records, epoch, acc, acc_cls, f1, kappa, iou, cm):
+    if len(best_records) < 5:
+        best_records.append({'epoch': epoch, 'acc': acc, 'acc_cls': acc_cls,
+                             'f1': f1, 'kappa': kappa, 'iou': iou, 'cm': cm})
+
+        torch.save(net.state_dict(), os.path.join(output_path, 'model_' + str(epoch) + '.pth'))
+        torch.save(optimizer.state_dict(), os.path.join(output_path, 'opt_' + str(epoch) + '.pth'))
+
+        if distribution_type == 'multi_fixed' or distribution_type == 'uniform' \
+                or distribution_type == 'multinomial':
+            np.save(output_path + 'patch_acc_loss_step_' + str(epoch) + '.npy', patch_acc_loss)
+            np.save(output_path + 'patch_occur_step_' + str(epoch) + '.npy', patch_occur)
+            np.save(output_path + 'patch_chosen_values_step_' + str(epoch) + '.npy', patch_chosen_values)
+    else:
+        # find min saved acc
+        min_index = 0
+        for i, r in enumerate(best_records):
+            if best_records[min_index]['acc_cls'] > best_records[i]['acc_cls']:
+                min_index = i
+        # check if currect acc is greater than min saved acc
+        if acc_cls > best_records[min_index]['acc_cls']:
+            # if it is, delete previous files
+            min_step = str(best_records[min_index]['epoch'])
+
+            os.remove(os.path.join(output_path, 'model_' + min_step + '.pth'))
+            os.remove(os.path.join(output_path, 'opt_' + min_step + '.pth'))
+
+            if distribution_type == 'multi_fixed' or distribution_type == 'uniform' \
+                    or distribution_type == 'multinomial':
+                os.remove(os.path.join(output_path, 'patch_acc_loss_step_' + min_step + '.npy'))
+                os.remove(os.path.join(output_path, 'patch_occur_step_' + min_step + '.npy'))
+                os.remove(os.path.join(output_path, 'patch_chosen_values_step_' + min_step + '.npy'))
+
+            # replace min value with current
+            best_records[min_index] = {'epoch': epoch, 'acc': acc, 'acc_cls': acc_cls,
+                                       'f1': f1, 'kappa': kappa, 'iou': iou, 'cm': cm}
+            # save current model
+            torch.save(net.state_dict(), os.path.join(output_path, 'model_' + str(epoch) + '.pth'))
+            torch.save(optimizer.state_dict(), os.path.join(output_path, 'opt_' + str(epoch) + '.pth'))
+            if distribution_type == 'multi_fixed' or distribution_type == 'uniform' \
+                    or distribution_type == 'multinomial':
+                np.save(output_path + 'patch_acc_loss_step_' + str(epoch) + '.npy', patch_acc_loss)
+                np.save(output_path + 'patch_occur_step_' + str(epoch) + '.npy', patch_occur)
+                np.save(output_path + 'patch_chosen_values_step_' + str(epoch) + '.npy', patch_chosen_values)
 
 
 def define_multinomial_probs(values, dif_prob=2):

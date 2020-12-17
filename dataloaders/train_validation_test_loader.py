@@ -76,7 +76,7 @@ class TrainValTestLoader(data.Dataset):
                                                   self.stride_crop, self.num_classes,
                                                   filtering_non_classes=(self.dataset == 'road_detection' or
                                                                          self.dataset == 'river'),
-                                                  percentage_filter=(0.99 if self.dataset == 'road_detection' else 0.99),
+                                                  percentage_filter=(0.999 if self.dataset == 'road_detection' else 0.999),
                                                   percentage_pos_class=(0.1 if self.dataset == 'road_detection' else 0.5))
         else:
             data, labels, names = self.load_images(['4'], simulate_images=simulate_images)
@@ -123,11 +123,20 @@ class TrainValTestLoader(data.Dataset):
     def __getitem__(self, index):
 
         # Reading items from list.
-        cur_map, cur_x, cur_y = self.distrib[index][0], self.distrib[index][1], self.distrib[index][2]
+        cur_map, cur_x, cur_y = np.copy(self.distrib[index][0]), \
+                                np.copy(self.distrib[index][1]),\
+                                np.copy(self.distrib[index][2])
 
-        img = self.data[cur_map, cur_x:cur_x + self.crop_size, cur_y:cur_y + self.crop_size, :]
-        label = self.labels[cur_map, cur_x:cur_x + self.crop_size, cur_y:cur_y + self.crop_size]
+        img = np.copy(self.data[cur_map, cur_x:cur_x + self.crop_size, cur_y:cur_y + self.crop_size, :])
+        label = np.copy(self.labels[cur_map, cur_x:cur_x + self.crop_size, cur_y:cur_y + self.crop_size])
         mask = np.ones((self.crop_size, self.crop_size), dtype=np.bool)
+
+        # print('--------1')
+        # print('pts', cur_map, cur_x, cur_y)
+        # print('data', self.data.shape, np.min(self.data), np.max(self.data), np.isnan(self.data).any())
+        # print('img', np.min(img), np.max(img), np.isnan(img).any())
+        # print('label', np.min(label), np.max(label), np.isnan(label).any())
+        # print('mask', np.min(mask), np.max(mask), np.isnan(mask).any())
 
         # Normalization.
         normalize_images(img, self.mean, self.std)
@@ -143,7 +152,7 @@ class TrainValTestLoader(data.Dataset):
         mask = torch.from_numpy(mask.copy())
 
         # Returning to iterator.
-        return img.double(), label, mask, self.distrib[index][0], self.distrib[index][1], self.distrib[index][2]
+        return img.double(), label, mask, cur_map, cur_x, cur_y
         # , np.asarray(self.distrib[index])
 
     def __len__(self):

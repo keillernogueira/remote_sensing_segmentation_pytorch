@@ -27,9 +27,9 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
     net.eval()
 
     prob_im = np.zeros([test_set.data.shape[0], test_set.data.shape[1], test_set.data.shape[2],
-                        test_set.num_classes], dtype=np.float32)
+                        test_set.num_classes], dtype=np.float64)
     occur_im = np.zeros([test_set.data.shape[0], test_set.data.shape[1], test_set.data.shape[2],
-                        test_set.num_classes], dtype=np.float32)
+                        test_set.num_classes], dtype=np.float64)
 
     with torch.no_grad():
         # Iterating over batches.
@@ -37,6 +37,15 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
 
             # Obtaining images, labels and paths for batch.
             inps, labs, masks, cur_maps, cur_xs, cur_ys = data
+
+            inps_np, labs_np, masks_np = inps.cpu().numpy(), labs.cpu().numpy(), masks.cpu().numpy()
+            print(np.min(inps_np), np.max(inps_np), np.isnan(inps_np).any())
+            print(np.min(labs_np), np.max(labs_np), np.isnan(labs_np).any())
+            print(np.min(masks_np), np.max(masks_np), np.isnan(masks_np).any())
+
+            # print(inps.size())
+            # print(labs.size())
+            # print(masks.size())
 
             inps = inps.squeeze()
             labs = labs.squeeze()
@@ -54,6 +63,10 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
             else:
                 outs = net(inps, feat=False)
 
+            # print(outs.size())
+            print(np.min(outs.cpu().detach().numpy()), np.max(outs.cpu().detach().numpy()),
+                  np.isnan(outs.cpu().detach().numpy()).any())
+
             # Computing probabilities.
             soft_outs = F.softmax(outs, dim=1)
 
@@ -68,6 +81,8 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
                 cur_x = cur_xs[j]
                 cur_y = cur_ys[j]
 
+                # print(cur_map, cur_x, cur_y)
+
                 outs_p = outs.permute(0, 2, 3, 1).cpu().numpy()
 
                 prob_im[cur_map, cur_x:cur_x + test_set.crop_size,
@@ -80,8 +95,9 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
         # Saving predictions.
         if save_images:
             for k, img_name in enumerate(test_set.names):
-                pred_path = os.path.join(output_path, img_name.replace('.tif', '_prd.png'))
-                imageio.imsave(pred_path, prob_im_argmax[k])
+                pred_path = os.path.join(output_path, img_name + '_prd.png')
+                print(pred_path)
+                imageio.imwrite(pred_path, prob_im_argmax[k])
 
         cm_test = create_cm(test_set.labels, prob_im_argmax)
 
@@ -96,16 +112,23 @@ def test(test_loader, test_set, net, output_path, epoch, gpu, save_images=False)
                     if (np.sum(cm_test[:, 1]) + np.sum(cm_test[1]) - cm_test[1][1]) != 0
                     else 0)
 
-        print("Epoch " + str(epoch) +
+        kappa_cm = kappa_with_cm(cm_test)
+        f1_cm = f1_with_cm(cm_test)
+
+        print("Validation/Test -- Epoch " + str(epoch) +
               " -- Time " + str(datetime.datetime.now().time()) +
               " Absolut Right Pred= " + str(int(total)) +
               " Overall Accuracy= " + "{:.4f}".format(total / float(np.sum(cm_test))) +
-              " Normalized Accuracy= " + "{:.4f}".format(_sum / float(inps.shape[-1])) +
+              " Normalized Accuracy= " + "{:.4f}".format(_sum / float(outs.shape[1])) +
+              " F1 Score= " + "{:.4f}".format(f1_cm) +
+              " Kappa= " + "{:.4f}".format(kappa_cm) +
               " IoU= " + "{:.4f}".format(_sum_iou) +
               " Confusion Matrix= " + np.array_str(cm_test).replace("\n", "")
               )
 
         sys.stdout.flush()
+
+    return total / float(np.sum(cm_test)), _sum / float(outs.shape[1]), f1_cm, kappa_cm, _sum_iou, cm_test
 
 
 def train(train_loader, net, criterion, optimizer, epoch, gpu):
@@ -119,6 +142,15 @@ def train(train_loader, net, criterion, optimizer, epoch, gpu):
     for i, data in enumerate(train_loader):
         # Obtaining images, labels and paths for batch.
         inps, labs, masks, _, _, _ = data
+
+        inps_np, labs_np, masks_np = inps.cpu().numpy(), labs.cpu().numpy(), masks.cpu().numpy()
+        print(np.min(inps_np), np.max(inps_np), np.isnan(inps_np).any())
+        print(np.min(labs_np), np.max(labs_np), np.isnan(labs_np).any())
+        print(np.min(masks_np), np.max(masks_np), np.isnan(masks_np).any())
+
+        # print(inps.size())
+        # print(labs.size())
+        # print(masks.size())
 
         # Casting tensors to cuda.
         inps, labs, masks = inps.cuda(gpu), labs.cuda(gpu), masks.cuda(gpu)
@@ -155,6 +187,10 @@ def train(train_loader, net, criterion, optimizer, epoch, gpu):
         # Updating loss meter.
         train_loss.append(loss.data.item())
 
+        # print(outs.size())
+        print(np.min(outs.cpu().detach().numpy()), np.max(outs.cpu().detach().numpy()),
+              np.isnan(outs.cpu().detach().numpy()).any())
+
         # Printing.
         if (i + 1) % DISPLAY_STEP == 0:
             # print('[epoch %d], [iter %d / %d], [train loss %.5f]' %
@@ -171,7 +207,7 @@ def train(train_loader, net, criterion, optimizer, epoch, gpu):
                         if (np.sum(batch_cm_train[:, 1]) + np.sum(batch_cm_train[1]) - batch_cm_train[1][1]) != 0
                         else 0)
 
-            print("Epoch " + str(epoch) + " -- Iter " + str(i+1) + "/" + str(len(train_loader)) +
+            print("Training -- Epoch " + str(epoch) + " -- Iter " + str(i+1) + "/" + str(len(train_loader)) +
                   " -- Time " + str(datetime.datetime.now().time()) +
                   " -- Training Minibatch: Loss= " + "{:.6f}".format(train_loss[-1]) +
                   " Absolut Right Pred= " + str(int(acc)) +
@@ -193,8 +229,8 @@ def main():
                         help='Path to to save outcomes (such as images and trained models) of the algorithm.')
     parser.add_argument('--simulate_dataset', type=str2bool, default=False,
                         help='Used to speed up the development process.')
-    parser.add_argument('--gpu', type=int, default=0,
-                        help='GPU number.')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU number.')
+    parser.add_argument('--save_images', type=str2bool, default=False, help='Bool to save images.')
 
     # dataset options
     parser.add_argument('--dataset', type=str, help='Dataset [Options: road_detection].')
@@ -249,38 +285,46 @@ def main():
     # net = SegNet(3, num_classes=list_dataset.num_classes, hidden_classes=hidden).cuda(args['device'])
     print(net)
 
-    # criterion = CrossEntropyLoss2d(weight=None, size_average=False, ignore_index=5).cuda(args['device'])
-    criterion = CrossEntropyLoss(weight=torch.DoubleTensor([1.0, 3.0]), size_average=False).cuda(args.gpu)
-
-    # Setting optimizer.
-    # optimizer = optim.Adam([
-    #     {'params': [param for name, param in net.named_parameters() if name[-4:] == 'bias'],
-    #      'lr': 2 * args['lr']},
-    #     {'params': [param for name, param in net.named_parameters() if name[-4:] != 'bias'],
-    #      'lr': args['lr'], 'weight_decay': args['weight_decay']}
-    # ], betas=(args['momentum'], 0.99))
-    optimizer = optim.Adam(net.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
-                           betas=(0.9, 0.99))
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.5)
-
     curr_epoch = 1
+    best_records = []
     if args.model_path is not None:
-        curr_epoch = int(args.model_path.split('-')[-1])
-    best_record = {'epoch': 0, 'lr': 1e-4, 'val_loss': 1e10, 'acc': 0, 'acc_cls': 0, 'iou': 0}
+        print('Loading pretrained weights from file "' + args.model_path + '"')
+        curr_epoch = int(args.model_path[:-4].split('_')[-1])
+        net.load_state_dict(torch.load(args.model_path))
 
-    # Iterating over epochs.
-    for epoch in range(curr_epoch, args.epoch_num + 1):
-        # Training function.
-        train(train_loader, net, criterion, optimizer, epoch, args.gpu)
+    if args.operation == 'Train':
+        # criterion = CrossEntropyLoss2d(weight=None, size_average=False, ignore_index=5).cuda(args['device'])
+        criterion = CrossEntropyLoss(weight=torch.DoubleTensor([1.0, 3.0]), size_average=False).cuda(args.gpu)
 
-        if epoch % VAL_INTERVAL == 0:
-            torch.save(net.state_dict(), os.path.join(args.output_path, 'model_' + str(epoch) + '.pth'))
-            torch.save(optimizer.state_dict(), os.path.join(args.output_path, 'opt_' + str(epoch) + '.pth'))
+        # Setting optimizer.
+        # optimizer = optim.Adam([
+        #     {'params': [param for name, param in net.named_parameters() if name[-4:] == 'bias'],
+        #      'lr': 2 * args.learning_rate},
+        #     {'params': [param for name, param in net.named_parameters() if name[-4:] != 'bias'],
+        #      'lr': args.learning_rate, 'weight_decay': args.weight_decay}
+        # ], betas=(0.9, 0.99))
+        optimizer = optim.Adam(net.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay,
+                               betas=(0.9, 0.99))
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.5)
 
-            # Computing test.
-            test(test_loader, test_set, net, args.output_path, epoch, args.gpu, save_images=False)
+        # Iterating over epochs.
+        for epoch in range(curr_epoch, args.epoch_num + 1):
+            # Training function.
+            train(train_loader, net, criterion, optimizer, epoch, args.gpu)
 
-        scheduler.step()
+            if epoch % VAL_INTERVAL == 0:
+                # Computing test.
+                acc, nacc, f1, kappa, iou, cm = test(test_loader, test_set, net, args.output_path,
+                                                     epoch, args.gpu, save_images=args.save_images)
+
+                save_best_models(net, optimizer, args.output_path, args.distribution_type, None, None, None,
+                                 best_records, epoch, acc, nacc, f1, kappa, iou, cm)
+
+            scheduler.step()
+    elif args.operation == 'Test':
+        test(test_loader, test_set, net, args.output_path, curr_epoch, args.gpu, save_images=args.save_images)
+    else:
+        raise NotImplementedError("Process " + args.operation + "not found!")
 
 
 if __name__ == "__main__":

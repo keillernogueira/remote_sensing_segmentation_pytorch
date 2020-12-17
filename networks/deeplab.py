@@ -1,97 +1,138 @@
-from networks.layers import _conv_layer, _max_pool
-
-import tensorflow as tf
-
-
-# parameters: 2.228.224
-def atrous_spatial_pyramid_pooling(inputs, atrous_rates, weight_decay, is_training):
-    with tf.variable_scope("aspp"):
-        # with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope(batch_norm_decay=batch_norm_decay)):
-        #     with arg_scope([layers.batch_norm], is_training=is_training):
-        inputs_size = tf.shape(inputs)[1:3]
-
-        # (a) one 1x1 convolution and three 3x3 convolutions with rates = (6, 12, 18) when output stride = 16.
-        # the rates are doubled when output stride = 8.
-        conv_1x1 = _conv_layer(inputs, [1, 1, 256, 256], "aspp_conv_1x1", is_training=is_training, strides=[1, 1, 1, 1],
-                               weight_decay=weight_decay)
-        conv_3x3_1 = _conv_layer(inputs, [3, 3, 256, 256], "aspp_conv_3x3_1", is_training=is_training,
-                                 strides=[1, 1, 1, 1], rate=atrous_rates[0], is_normal_conv=False,
-                                 weight_decay=weight_decay)
-        conv_3x3_2 = _conv_layer(inputs, [3, 3, 256, 256], "aspp_conv_3x3_2", is_training=is_training,
-                                 strides=[1, 1, 1, 1], rate=atrous_rates[1], is_normal_conv=False,
-                                 weight_decay=weight_decay)
-        conv_3x3_3 = _conv_layer(inputs, [3, 3, 256, 256], "aspp_conv_3x3_3", is_training=is_training,
-                                 strides=[1, 1, 1, 1], rate=atrous_rates[2], is_normal_conv=False,
-                                 weight_decay=weight_decay)
-
-        # conv_3x3_1 = _conv_layer(inputs, depth, [3, 3], stride=1, rate=atrous_rates[0],
-        #                                scope='conv_3x3_1')
-        # conv_3x3_2 = _conv_layer(inputs, depth, [3, 3], stride=1, rate=atrous_rates[1],
-        #                                scope='conv_3x3_2')
-        # conv_3x3_3 = _conv_layer(inputs, depth, [3, 3], stride=1, rate=atrous_rates[2],
-        #                                scope='conv_3x3_3')
-
-        # (b) the image-level features
-        with tf.variable_scope("image_level_features"):
-            # global average pooling
-            image_level_features = tf.reduce_mean(inputs, [1, 2], name='global_average_pooling', keepdims=True)
-            # 1x1 convolution with 256 filters( and batch normalization)
-            image_level_features = _conv_layer(image_level_features, [1, 1, 256, 256], "ilf_conv_1x1",
-                                               is_training=is_training, strides=[1, 1, 1, 1], weight_decay=weight_decay)
-            # bilinearly upsample features
-            image_level_features = tf.image.resize_bilinear(image_level_features, inputs_size, name='upsample')
-
-        net = tf.concat([conv_1x1, conv_3x3_1, conv_3x3_2, conv_3x3_3, image_level_features], axis=3, name='concat')
-        net = _conv_layer(net, [1, 1, 256*5, 256], "conv_1x1_concat",
-                          is_training=is_training, strides=[1, 1, 1, 1], weight_decay=weight_decay)
-
-        return net
+import torch
+import torch.nn.functional as F
+from torch import nn
+from networks.utils import initialize_weights
 
 
-def deeplab(x, dropout, is_training, weight_decay, crop, num_input_bands, num_classes, crop_size, extract_features):
-    x = tf.reshape(x, shape=[-1, crop_size, crop_size, num_input_bands])
+class _EncoderBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(_EncoderBlock, self).__init__()
 
-    conv1_1 = _conv_layer(x, [3, 3, num_input_bands, 64], 'conv1_1', weight_decay, is_training, batch_norm=True)
-    conv1_2 = _conv_layer(conv1_1, [3, 3, 64, 64], 'conv1_2', weight_decay, is_training, batch_norm=True)
-    pool1 = _max_pool(conv1_2, kernel=[1, 2, 2, 1], strides=[1, 2, 2, 1], name='pool_1')
+        self.encode = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
 
-    conv2_1 = _conv_layer(pool1, [3, 3, 64, 128], 'conv2_1', weight_decay, is_training, batch_norm=True)
-    conv2_2 = _conv_layer(conv2_1, [3, 3, 128, 128], 'conv2_2', weight_decay, is_training, batch_norm=True)
-    pool2 = _max_pool(conv2_2, kernel=[1, 2, 2, 1], strides=[1, 2, 2, 1], name='pool_2')
+    def forward(self, x):
+        return self.encode(x)
 
-    conv3_1 = _conv_layer(pool2, [3, 3, 128, 256], 'conv3_1', weight_decay, is_training, batch_norm=True)
-    conv3_2 = _conv_layer(conv3_1, [3, 3, 256, 256], 'conv3_2', weight_decay, is_training, batch_norm=True)
-    pool3 = _max_pool(conv3_2, kernel=[1, 2, 2, 1], strides=[1, 2, 2, 1], name='pool_3')
 
-    encoder_output = atrous_spatial_pyramid_pooling(pool3, [2, 2, 2], weight_decay, is_training)
+class _ASPPBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, atrous_rates):
+        super(_ASPPBlock, self).__init__()
 
-    with tf.variable_scope("decoder"):
-        # with tf.contrib.slim.arg_scope(resnet_v2.resnet_arg_scope(batch_norm_decay=batch_norm_decay)):
-        #     with arg_scope([layers.batch_norm], is_training=is_training):
-        with tf.variable_scope("low_level_features"):
-            low_level_features = pool1
-            low_level_features = _conv_layer(low_level_features, [1, 1, 64, 256], "conv_1x1",
-                                             is_training=is_training, strides=[1, 1, 1, 1], weight_decay=weight_decay)
-            # conv2d(low_level_features, 48, [1, 1], stride=1, scope='conv_1x1')
-            low_level_features_size = tf.shape(low_level_features)[1:3]
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=atrous_rates[0], dilation=atrous_rates[0]),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=atrous_rates[1], dilation=atrous_rates[1]),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=atrous_rates[2], dilation=atrous_rates[2]),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
 
-        with tf.variable_scope("upsampling_logits"):
-            net = tf.image.resize_bilinear(encoder_output, low_level_features_size, name='upsample_1')
-            net = tf.concat([net, low_level_features], axis=3, name='concat')
-            net = _conv_layer(net, [3, 3, 256*2, 256], "conv_3x3_1",
-                              is_training=is_training, strides=[1, 1, 1, 1], weight_decay=weight_decay)
-            net = _conv_layer(net, [3, 3, 256, 256], "conv_3x3_2",
-                              is_training=is_training, strides=[1, 1, 1, 1], weight_decay=weight_decay)
-            net = _conv_layer(net, [1, 1, 256, num_classes], "conv_1x1", is_training=is_training, batch_norm=False,
-                              has_activation=False, strides=[1, 1, 1, 1], weight_decay=weight_decay)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
 
-            # net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_1')
-            # net = layers_lib.conv2d(net, 256, [3, 3], stride=1, scope='conv_3x3_2')
-            # net = layers_lib.conv2d(net, num_classes, [1, 1], activation_fn=None, normalizer_fn=None, scope='conv_1x1')
-            logits = tf.image.resize_bilinear(net, tf.shape(x)[1:3], name='upsample_2')
+        self.conv6 = nn.Sequential(
+            nn.Conv2d(out_channels * 5, out_channels, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
 
-    if extract_features is True:
-        return tf.image.resize_bilinear(encoder_output, tf.shape(x)[1:3]), \
-               tf.image.resize_bilinear(low_level_features, tf.shape(x)[1:3]), logits
-    else:
-        return logits
+    def forward(self, x):
+        _, _, h, w = x.shape
+        c1 = self.conv1(x)
+        c2 = self.conv2(x)
+        c3 = self.conv3(x)
+        c4 = self.conv4(x)
+
+        p1 = self.pool(x)
+        c5 = self.conv5(p1)
+        b1 = F.interpolate(c5, size=(h, w), mode="bilinear", align_corners=False)
+
+        cat = torch.cat([c1, c2, c3, c4, b1], dim=1)
+        return self.conv6(cat)
+
+
+class _DecoderBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel, padding):
+        super(_DecoderBlock, self).__init__()
+
+        self.decode = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=kernel, stride=1, padding=padding),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.decode(x)
+
+
+class DeepLab(nn.Module):
+    def __init__(self, input_channels, num_classes):
+        super(DeepLab, self).__init__()
+
+        self.enc1 = _EncoderBlock(input_channels, 64)
+        self.enc2 = _EncoderBlock(64, 128)
+        self.enc3 = _EncoderBlock(128, 256)
+
+        self.aspp = _ASPPBlock(256, 256, atrous_rates=[2, 4, 8])
+
+        self.low_level_features = _DecoderBlock(64, 256, kernel=1, padding=0)
+
+        self.dec3 = _DecoderBlock(256*2, 256, kernel=3, padding=1)
+        self.dec2 = _DecoderBlock(256, 256, kernel=3, padding=1)
+
+        self.dec1 = nn.Conv2d(256, num_classes, kernel_size=1, stride=1, padding=0)
+
+        initialize_weights(self)
+
+    def forward(self, x, feat=False):
+        _, _, h, w = x.shape
+
+        enc1 = self.enc1(x)
+        enc2 = self.enc2(enc1)
+        enc3 = self.enc3(enc2)
+
+        aspp = self.aspp(enc3)
+
+        low_level_features = self.low_level_features(enc1)
+
+        _, _, h_lf, w_lf = low_level_features.shape
+        b1 = F.interpolate(aspp, size=(h_lf, w_lf), mode="bilinear", align_corners=False)
+        cat = torch.cat([b1, low_level_features], dim=1)
+
+        dec3 = self.dec3(cat)
+        dec2 = self.dec2(dec3)
+
+        dec1 = self.dec1(dec2)
+
+        final = F.interpolate(dec1, size=(h, w), mode="bilinear", align_corners=False)
+
+        if feat:
+            return (final,
+                    F.upsample(dec1, x.size()[2:], mode='bilinear'),
+                    F.upsample(dec2, x.size()[2:], mode='bilinear'))
+        else:
+            return final
